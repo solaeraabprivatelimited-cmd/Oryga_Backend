@@ -1,0 +1,9 @@
+{
+  "imports": {
+    "@supabase/supabase-js": "npm:@supabase/supabase-js@2",
+    "hono": "https://deno.land/x/hono@v4.3.11/mod.ts",
+    "hono/cors": "https://deno.land/x/hono@v4.3.11/middleware/cors/mod.ts",
+    "hono/logger": "https://deno.land/x/hono@v4.3.11/middleware/logger/mod.ts"
+  },
+  "nodeModulesDir": "auto"
+}
