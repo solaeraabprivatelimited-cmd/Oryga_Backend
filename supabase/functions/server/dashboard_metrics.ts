@@ -1,12 +1,9 @@
 import * as kv from "./kv_store.tsx";
 
-// Helper to simulate data for the dashboard since we don't have historical data or granular timestamps
 function getTrend(current: number) {
-    const randomPercent = Math.floor(Math.random() * 15) + 1;
-    const isUp = Math.random() > 0.4; // Slightly biased towards growth
     return {
-        value: randomPercent,
-        direction: isUp ? 'up' : 'down'
+        value: 0,
+        direction: 'stable'
     };
 }
 
@@ -14,7 +11,7 @@ export async function getAdvancedDashboardStats(user: any, date: string) {
     const hospitalId = user.id;
     const today = date || new Date().toISOString().split('T')[0];
 
-    // 1. Fetch All Data (Simulated Joins)
+    // 1. Fetch persisted operational data
     const allAppointments = await kv.getByPrefix("appointment:");
     const allSlots = await kv.getByPrefix("slot:");
     const allProfiles = await kv.getByPrefix("doctor_profile:");
@@ -35,8 +32,11 @@ export async function getAdvancedDashboardStats(user: any, date: string) {
     const activeDocsCount = hospitalDoctors.length; // Active roster
     
     // Revenue
-    const revenueActual = completedAppointments * 500; // Mock fee if not in apt
-    const revenueExpected = opdCount * 500;
+    const revenueActual = todayAppointments
+        .filter((apt: any) => apt.status === 'Completed')
+        .reduce((sum: number, apt: any) => sum + Number(apt.amount || apt.consultationFee || apt.fee || 0), 0);
+    const revenueExpected = todayAppointments
+        .reduce((sum: number, apt: any) => sum + Number(apt.amount || apt.consultationFee || apt.fee || 0), 0);
 
     const kpi = {
         opd: {
@@ -100,7 +100,6 @@ export async function getAdvancedDashboardStats(user: any, date: string) {
     const departmentMetrics = Object.values(departments).map((dept: any) => {
         const queueLength = dept.appointments.filter((a: any) => a.status !== 'Completed' && a.status !== 'Cancelled').length;
         
-        // Mock wait time calculation: 5 mins per person in queue / active docs
         const avgWaitTime = dept.activeDoctors > 0 ? Math.round((queueLength * 15) / dept.activeDoctors) : 0;
         
         let status = 'Normal';
@@ -125,16 +124,13 @@ export async function getAdvancedDashboardStats(user: any, date: string) {
     });
 
     // --- FINANCIAL PROJECTION ---
-    const dailyRunRate = revenueActual; // Simplified for "Today"
+    const dailyRunRate = revenueActual;
     const daysInMonth = new Date(new Date().getFullYear(), new Date().getMonth() + 1, 0).getDate();
     const currentDay = new Date().getDate();
-    // Simple projection: (Revenue so far / days so far) * days in month
-    // We don't have historical revenue in KV easily accessible for MTD sum without scanning ALL appointments.
-    // We will scan all hospital appointments for THIS MONTH.
     const currentMonth = new Date().toISOString().slice(0, 7); // YYYY-MM
     const monthAppointments = hospitalAppointments.filter((apt: any) => apt.date && apt.date.startsWith(currentMonth) && apt.status === 'Completed');
     
-    const mtdRevenue = monthAppointments.reduce((sum: number, apt: any) => sum + 500, 0);
+    const mtdRevenue = monthAppointments.reduce((sum: number, apt: any) => sum + Number(apt.amount || apt.consultationFee || apt.fee || 0), 0);
     const projectedRevenue = Math.round((mtdRevenue / Math.max(currentDay, 1)) * daysInMonth);
 
     const finance = {
@@ -159,7 +155,7 @@ export async function getAdvancedDashboardStats(user: any, date: string) {
             department: doc.specialty || 'General',
             slotsAssigned: assignedSlots.length,
             slotsUsed: docAppts.length,
-            avgConsultTime: 15, // Mock constant
+            avgConsultTime: doc.avgConsultTime || null,
             utilization: assignedSlots.length > 0 ? Math.round((docAppts.length / assignedSlots.length) * 100) : 0
         };
     });

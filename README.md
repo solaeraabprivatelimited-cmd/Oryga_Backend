@@ -15,8 +15,13 @@ Deploy the server function from this repository with the Supabase CLI:
 npx supabase functions deploy server
 ```
 
-Apply migrations with:
+Apply the single consolidated migration with:
 
 ```bash
-npx supabase db push
+npx supabase db push --include-all
 ```
+
+If your linked project already has old migration history that no longer exists
+locally, run this file directly in the Supabase SQL editor instead:
+
+`supabase/migrations/20260504_001_oryga_full_schema.sql`
