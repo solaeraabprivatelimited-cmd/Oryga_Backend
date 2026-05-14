@@ -114,9 +114,6 @@ export async function getAdvancedDashboardStats(user: any, date: string) {
     const currentDay = new Date().getDate();
     const currentMonth = new Date().toISOString().slice(0, 7);
     const monthAppointments = hospitalAppointments.filter((apt: any) => apt.date && apt.date.startsWith(currentMonth) && apt.status === 'Completed');
-
-    // BUG FIX: reduce was ignoring `sum` and always adding the hardcoded value 500,
-    // discarding actual appointment fees. Now uses apt.fee with 500 as fallback.
     const mtdRevenue = monthAppointments.reduce((sum: number, apt: any) => sum + (apt.fee || 500), 0);
     const projectedRevenue = Math.round((mtdRevenue / Math.max(currentDay, 1)) * daysInMonth);
 

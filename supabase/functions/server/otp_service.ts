@@ -1,25 +1,22 @@
 import * as kv from "./kv_store.tsx";
 
 const OTP_EXPIRY_MINUTES = 5;
-// BUG FIX: MAX_OTP_ATTEMPTS_PER_HOUR was defined but never enforced. Now enforced below.
 const MAX_OTP_ATTEMPTS_PER_HOUR = 5;
 
 export function generateOTP(): string {
-  // BUG FIX: Was hardcoded to "123456" — a critical security vulnerability.
-  // Uses Web Crypto to generate a cryptographically random 6-digit OTP.
   const array = new Uint32Array(1);
   crypto.getRandomValues(array);
   return String((array[0] % 900000) + 100000);
 }
 
 export async function createOTP(mobileNumber: string) {
-  // BUG FIX: Rate limiting was entirely missing. Enforce per-hour bucket.
   const hourBucket = new Date().toISOString().slice(0, 13); // "YYYY-MM-DDTHH"
   const rateLimitKey = `otp_rate:${mobileNumber}:${hourBucket}`;
   const rateData = (await kv.get(rateLimitKey)) || { count: 0 };
   if (rateData.count >= MAX_OTP_ATTEMPTS_PER_HOUR) {
     return { success: false, error: 'Too many OTP requests. Please try again later.' };
   }
+
   rateData.count++;
   await kv.set(rateLimitKey, rateData);
 
@@ -37,8 +34,7 @@ export async function createOTP(mobileNumber: string) {
   };
 
   await kv.set(`otp:${mobileNumber}`, otpRecord);
-  // BUG FIX: OTP was returned in the API response, defeating out-of-band verification.
-  // Callers must now send the OTP via SMS instead of reading it from this response.
+  // TODO: send OTP via SMS provider (Twilio, MSG91, etc.) — do NOT return it in the response
   return { success: true };
 }
 

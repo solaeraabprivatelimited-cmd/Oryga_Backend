@@ -474,6 +474,9 @@ app.post(`${BASE_PATH}/vitals`, async (c) => {
 // BUG FIX: GET /vitals/patient/:patientId had no auth guard
 app.get(`${BASE_PATH}/vitals/patient/:patientId`, async (c) => {
   try {
+    const { user, error } = await getUser(c);
+    if (error) return c.json({ error }, 401);
+
     const patientId = c.req.param('patientId');
 
     const { user, error } = await getUser(c);
@@ -835,6 +838,11 @@ app.get(`${BASE_PATH}/doctor/analytics/overview`, async (c) => {
     } else if (apt.status === 'cancelled') {
       cancelledConsultations++;
     }
+  }
+
+  let cancelledConsultations = 0;
+  for (const apt of doctorApts) {
+    if (apt.status === 'cancelled') cancelledConsultations++;
   }
 
   return c.json({
@@ -1353,6 +1361,85 @@ app.post(`${BASE_PATH}/payments/verify`, async (c) => {
     appointmentId: appointment_id || null,
     message: "Payment signature verified",
   });
+});
+
+// 14. ORYA AI EVENTS FEED
+// ─────────────────────────────────────────────────────────────────────────────────────
+
+app.get(`${BASE_PATH}/orya/events`, async (c) => {
+  try {
+    const authToken = c.req.query('authToken');
+    const context = c.req.query('context') || 'system';
+
+    let role = 'guest';
+    let userId: string | null = null;
+
+    if (authToken) {
+      const { user } = await getUser(c, authToken);
+      if (user) {
+        userId = user.id;
+        role = user.user_metadata?.role || 'patient';
+      }
+    }
+
+    const events: any[] = [];
+    const today = new Date().toISOString().split('T')[0];
+
+    if (role === 'super_admin' || role === 'hospital') {
+      const verifications = await kv.getByPrefix('verification:');
+      const pending = verifications.filter((v: any) => v.status === 'pending');
+      if (pending.length > 0) {
+        events.push({
+          id: crypto.randomUUID(),
+          type: 'alert',
+          severity: 'warning',
+          title: `${pending.length} Pending Verification${pending.length > 1 ? 's' : ''}`,
+          message: 'Doctors or hospitals awaiting verification review.',
+          action: { label: 'Review', route: '/admin/verifications' },
+          timestamp: new Date().toISOString()
+        });
+      }
+    }
+
+    if (role === 'doctor' && userId) {
+      const appointments = await kv.getByPrefix('appointment:');
+      const todayApts = appointments.filter((a: any) => a.doctorId === userId && a.date === today && a.status !== 'cancelled');
+      if (todayApts.length > 0) {
+        events.push({
+          id: crypto.randomUUID(),
+          type: 'info',
+          severity: 'info',
+          title: `${todayApts.length} Appointment${todayApts.length > 1 ? 's' : ''} Today`,
+          message: `You have ${todayApts.length} scheduled appointment${todayApts.length > 1 ? 's' : ''} for today.`,
+          timestamp: new Date().toISOString()
+        });
+      }
+    }
+
+    if (role === 'patient' && userId) {
+      const appointments = await kv.getByPrefix('appointment:');
+      const upcoming = appointments.filter((a: any) => a.patientId === userId && a.date >= today && a.status !== 'cancelled');
+      if (upcoming.length > 0) {
+        events.push({
+          id: crypto.randomUUID(),
+          type: 'reminder',
+          severity: 'info',
+          title: 'Upcoming Appointment',
+          message: `You have ${upcoming.length} upcoming appointment${upcoming.length > 1 ? 's' : ''}.`,
+          timestamp: new Date().toISOString()
+        });
+      }
+    }
+
+    return c.json({
+      active: events.length > 0,
+      events,
+      context,
+      generatedAt: new Date().toISOString()
+    });
+  } catch (e: any) {
+    return c.json({ active: false, events: [], context: c.req.query('context') || 'system', generatedAt: new Date().toISOString() });
+  }
 });
 
 Deno.serve(app.fetch);
