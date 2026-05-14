@@ -51,9 +51,8 @@ function timingSafeEqual(a: string, b: string) {
   return result === 0;
 }
 
-// BUG FIX 1: verifyPaymentSignature used `${orderId}${paymentId}` (no separator).
-// Razorpay's spec and computeRazorpaySignature both require `${orderId}|${paymentId}`.
-// Mismatched formats caused all webhook signature checks to fail.
+// BUG FIX: verifyPaymentSignature used `${orderId}${paymentId}` (no separator).
+// Razorpay spec and computeRazorpaySignature both require `${orderId}|${paymentId}`.
 async function verifyPaymentSignature(orderId: string, paymentId: string, signature: string): Promise<boolean> {
   try {
     const message = `${orderId}|${paymentId}`;
@@ -277,6 +276,124 @@ async function getUser(c: any, providedToken?: string) {
 
 // --- API ROUTES ---
 
+// ORYA INTELLIGENCE ENGINE
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /orya/events
+// Polled by the frontend ORYAContext every 10-30 s. Returns contextual events
+// that drive the in-app AI assistant overlay. Returns 200 with an empty events
+// array when everything is nominal — never 404.
+app.get(`${BASE_PATH}/orya/events`, async (c) => {
+  try {
+    const context = c.req.query('context') || 'system';
+    const resourceId = c.req.query('resourceId');
+    const authToken = c.req.query('authToken');
+
+    // Auth is optional — unauthenticated calls get a minimal public response.
+    const { user } = await getUser(c, authToken);
+    const role = user?.user_metadata?.role || 'guest';
+
+    const events: any[] = [];
+    const now = new Date().toISOString();
+
+    if (user) {
+      if (context === 'system' || context === 'admin') {
+        // Surface pending verifications for admins/hospital admins
+        if (role === 'super_admin' || role === 'hospital') {
+          const verifications = await kv.getByPrefix('verification:');
+          const pending = verifications.filter((v: any) => v.status === 'pending');
+          if (pending.length > 0) {
+            events.push({
+              id: `orya-pending-verif-${Date.now()}`,
+              severity: pending.length > 5 ? 'alert' : 'info',
+              message_key: 'pending_verifications',
+              metadata: { count: pending.length },
+              expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString()
+            });
+          }
+
+          // Surface pending blog reviews
+          const blogs = await kv.getByPrefix('doctor_blog:');
+          const pendingBlogs = blogs.filter((b: any) => b.status === 'pending_review');
+          if (pendingBlogs.length > 0) {
+            events.push({
+              id: `orya-pending-blogs-${Date.now()}`,
+              severity: 'info',
+              message_key: 'pending_blog_reviews',
+              metadata: { count: pendingBlogs.length },
+              expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString()
+            });
+          }
+        }
+
+        // Surface today's appointments for doctors
+        if (role === 'doctor') {
+          const today = new Date().toISOString().split('T')[0];
+          const appointments = await kv.getByPrefix('appointment:');
+          const todayApts = appointments.filter(
+            (a: any) => a.doctorId === user.id && a.date === today && a.status === 'scheduled'
+          );
+          if (todayApts.length > 0) {
+            events.push({
+              id: `orya-today-apts-${Date.now()}`,
+              severity: 'assist',
+              message_key: 'todays_appointments',
+              metadata: { count: todayApts.length, date: today },
+              expires_at: new Date(Date.now() + 30 * 60 * 1000).toISOString()
+            });
+          }
+        }
+
+        // Surface upcoming appointments for patients
+        if (role === 'patient') {
+          const appointments = await kv.getByPrefix('appointment:');
+          const upcoming = appointments.filter(
+            (a: any) => a.patientId === user.id && a.status === 'scheduled' &&
+              new Date(a.date) >= new Date()
+          );
+          if (upcoming.length > 0) {
+            events.push({
+              id: `orya-upcoming-apt-${Date.now()}`,
+              severity: 'info',
+              message_key: 'upcoming_appointment',
+              metadata: { count: upcoming.length },
+              expires_at: new Date(Date.now() + 15 * 60 * 1000).toISOString()
+            });
+          }
+        }
+      }
+
+      // Slot-level context — surface hold timer warnings
+      if (context === 'booking' && resourceId) {
+        const slot = await kv.get(`slot:${resourceId}`);
+        if (slot?.status === 'HOLDING' && slot?.hold_expires_at) {
+          const remainingMs = new Date(slot.hold_expires_at).getTime() - Date.now();
+          if (remainingMs < 60 * 1000 && remainingMs > 0) {
+            events.push({
+              id: `orya-hold-expiring-${resourceId}`,
+              severity: 'alert',
+              message_key: 'slot_hold_expiring',
+              metadata: { slotId: resourceId, secondsRemaining: Math.round(remainingMs / 1000) },
+              expires_at: slot.hold_expires_at
+            });
+          }
+        }
+      }
+    }
+
+    return c.json({
+      active: events.length > 0,
+      events,
+      context,
+      generatedAt: now
+    });
+  } catch (e: any) {
+    console.error('ORYA events error:', e);
+    // Never return 404 — that stops the frontend from polling.
+    // Return empty events so the overlay stays dormant.
+    return c.json({ active: false, events: [], context: 'system', generatedAt: new Date().toISOString() });
+  }
+});
+
 // 1. APPOINTMENTS
 
 app.get(`${BASE_PATH}/appointments`, async (c) => {
@@ -316,7 +433,7 @@ app.post(`${BASE_PATH}/appointments`, async (c) => {
     delete appointment.authToken;
 
     await kv.set(`appointment:${aptId}`, appointment);
-    // BUG FIX 2: logActivity was not awaited — floating promise masked write errors
+    // BUG FIX: logActivity was not awaited
     await logActivity(user.id, user.user_metadata?.role, 'create_appointment', aptId, { doctorId: body.doctorId });
 
     return c.json({ message: "Appointment created", appointment }, 201);
@@ -354,8 +471,7 @@ app.post(`${BASE_PATH}/vitals`, async (c) => {
   }
 });
 
-// BUG FIX 3: GET /vitals/patient/:patientId had no auth guard — any unauthenticated
-// request could read any patient's health vitals.
+// BUG FIX: GET /vitals/patient/:patientId had no auth guard
 app.get(`${BASE_PATH}/vitals/patient/:patientId`, async (c) => {
   try {
     const patientId = c.req.param('patientId');
@@ -458,7 +574,7 @@ app.get(`${BASE_PATH}/doctor/schedules`, async (c) => {
   return c.json(scheduleDetails);
 });
 
-// BUG FIX 4: `date` query param was read but never used — slots were never filtered by date.
+// BUG FIX: date query param was read but never used to filter slots
 app.get(`${BASE_PATH}/doctor/:doctorId/available-slots`, async (c) => {
   const doctorId = c.req.param('doctorId');
   const date = c.req.query('date');
@@ -693,8 +809,7 @@ app.get(`${BASE_PATH}/doctor/earnings/summary`, async (c) => {
 
 // 7. DASHBOARD ANALYTICS
 
-// BUG FIX 5: cancelledConsultations was `total - completed`, which incorrectly
-// counted scheduled/in-progress appointments as cancelled.
+// BUG FIX: cancelledConsultations was `total - completed` (wrong); now counts only status==='cancelled'
 app.get(`${BASE_PATH}/doctor/analytics/overview`, async (c) => {
   const { user, error } = await getUser(c);
   if (error) return c.json({ error }, 401);
@@ -1048,9 +1163,7 @@ app.get(`${BASE_PATH}/admin/verifications`, async (c) => {
 });
 
 // 12. JOB APPLICATIONS
-// BUG FIX 6: Duplicate POST /job-applications route removed. The original section-9 handler
-// created an incomplete record and only indexed by user. This single merged handler creates
-// a complete record and indexes by BOTH job and user.
+// BUG FIX: duplicate route removed; merged handler indexes by both job and user.
 app.post(`${BASE_PATH}/job-applications`, async (c) => {
   try {
     const body = await c.req.json();
@@ -1201,10 +1314,7 @@ app.post(`${BASE_PATH}/payments/razorpay-webhook`, async (c) => {
         await kv.set(`notification:${notification.id}`, notification);
       }
 
-      await logActivity('system', 'webhook', 'razorpay_payment_webhook', orderId, {
-        paymentStatus,
-        paymentId
-      });
+      await logActivity('system', 'webhook', 'razorpay_payment_webhook', orderId, { paymentStatus, paymentId });
 
       return c.json({ message: "Webhook processed successfully", orderId, paymentStatus }, 200);
     } else {
